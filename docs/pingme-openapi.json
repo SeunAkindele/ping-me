@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PingMe API",
-    "description": "PingMe personal reminder system — manage users, reminders, and background notification delivery.",
+    "description": "PingMe personal reminder system — manage users and reminders.\n\n**HTTP surface (Stages 1–4):** create users, create/list/get/delete reminders.\n\n**Background (Stages 5–6, not HTTP):** every ~30s the scheduler claims due `PENDING` reminders and enqueues jobs; every ~10s the worker sends notifications and moves reminders to `SENT` (or jobs to `FAILED`).\n\n**Apidog test flow**\n1. `GET /health` — confirm the app is up\n2. `POST /users` — create a user; copy `id`\n3. `POST /reminders` — create a reminder with that `userId`\n4. Use `scheduledTime` a few seconds in the past (or very soon) to exercise the worker\n5. Poll `GET /reminders/{id}` until `status` becomes `PROCESSING` then `SENT`\n6. Check app logs for the console notification block",
     "version": "0.0.1-SNAPSHOT"
   },
   "servers": [
@@ -12,16 +12,29 @@
     }
   ],
   "tags": [
-    { "name": "Health", "description": "Liveness / readiness probes" },
-    { "name": "Hello", "description": "Greeting endpoint (Stage 1 demo)" },
-    { "name": "Users", "description": "User management" },
-    { "name": "Reminders", "description": "Reminder CRUD" }
+    {
+      "name": "Health",
+      "description": "Liveness probe"
+    },
+    {
+      "name": "Hello",
+      "description": "Greeting endpoint (Stage 1 demo)"
+    },
+    {
+      "name": "Users",
+      "description": "User management"
+    },
+    {
+      "name": "Reminders",
+      "description": "Reminder CRUD. Status changes after create come from the background scheduler/worker, not from these endpoints."
+    }
   ],
   "paths": {
     "/health": {
       "get": {
         "tags": ["Health"],
         "summary": "Liveness probe",
+        "description": "Lightweight check that the process is up. Does not verify PostgreSQL.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -40,6 +53,7 @@
       "get": {
         "tags": ["Hello"],
         "summary": "Greeting message",
+        "description": "Stage 1 demo endpoint. Confirms DI + REST wiring.",
         "operationId": "hello",
         "responses": {
           "200": {
@@ -58,15 +72,21 @@
       "post": {
         "tags": ["Users"],
         "summary": "Create a user",
+        "description": "Creates a user. Email must be unique. Use the returned `id` as `userId` when creating reminders.",
         "operationId": "createUser",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": { "$ref": "#/components/schemas/CreateUserRequest" },
-              "example": {
-                "name": "Ada Lovelace",
-                "email": "ada@example.com"
+              "examples": {
+                "ada": {
+                  "summary": "Standard user",
+                  "value": {
+                    "name": "Ada Lovelace",
+                    "email": "ada@example.com"
+                  }
+                }
               }
             }
           }
@@ -109,7 +129,7 @@
                   "timestamp": "2026-11-06T09:00:00Z",
                   "status": 409,
                   "error": "Conflict",
-                  "message": "Email already registered: ada@example.com"
+                  "message": "User with email already exists: ada@example.com"
                 }
               }
             }
@@ -121,24 +141,40 @@
       "post": {
         "tags": ["Reminders"],
         "summary": "Create a reminder for an existing user",
+        "description": "Creates a reminder in `PENDING` status.\n\n- Use a **future** `scheduledTime` for normal storage/list tests.\n- Use a **past** (or near-now) `scheduledTime` to trigger Stage 5/6: within ~30s the scheduler moves it to `PROCESSING` and enqueues a job; within ~10s more the worker sends the console notification and status becomes `SENT`.\n\nThere is no HTTP endpoint for jobs; observe via `GET /reminders/{id}` and application logs.",
         "operationId": "createReminder",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": { "$ref": "#/components/schemas/CreateReminderRequest" },
-              "example": {
-                "userId": 1,
-                "title": "Call John",
-                "description": "Discuss project",
-                "scheduledTime": "2030-01-15T10:00:00Z"
+              "examples": {
+                "futureReminder": {
+                  "summary": "Future reminder (stays PENDING until due)",
+                  "value": {
+                    "userId": 1,
+                    "title": "Call John",
+                    "description": "Discuss project",
+                    "scheduledTime": "2030-01-15T10:00:00Z"
+                  }
+                },
+                "dueNowForWorkerTest": {
+                  "summary": "Already due — exercises scheduler + worker",
+                  "description": "Replace userId with a real user id. scheduledTime in the past makes the next scheduler tick claim it.",
+                  "value": {
+                    "userId": 1,
+                    "title": "Call John now",
+                    "description": "Should move PENDING → PROCESSING → SENT",
+                    "scheduledTime": "2020-01-01T10:00:00Z"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
           "201": {
-            "description": "Reminder created",
+            "description": "Reminder created (`PENDING`)",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ReminderResponse" },
@@ -187,6 +223,7 @@
       "get": {
         "tags": ["Reminders"],
         "summary": "List reminders (optionally filtered by userId)",
+        "description": "Returns all reminders, or only those for `userId` when the query param is set. Useful after creating a due reminder to watch status change over time.",
         "operationId": "listReminders",
         "parameters": [
           {
@@ -207,17 +244,31 @@
                   "type": "array",
                   "items": { "$ref": "#/components/schemas/ReminderResponse" }
                 },
-                "example": [
-                  {
-                    "id": 1,
-                    "userId": 1,
-                    "title": "Call John",
-                    "description": "Discuss project",
-                    "scheduledTime": "2030-01-15T10:00:00Z",
-                    "status": "PENDING",
-                    "createdAt": "2026-11-06T09:00:00Z"
+                "examples": {
+                  "pendingAndSent": {
+                    "summary": "Mixed statuses after background processing",
+                    "value": [
+                      {
+                        "id": 1,
+                        "userId": 1,
+                        "title": "Call John",
+                        "description": "Discuss project",
+                        "scheduledTime": "2030-01-15T10:00:00Z",
+                        "status": "PENDING",
+                        "createdAt": "2026-11-06T09:00:00Z"
+                      },
+                      {
+                        "id": 2,
+                        "userId": 1,
+                        "title": "Call John now",
+                        "description": "Should move PENDING → PROCESSING → SENT",
+                        "scheduledTime": "2020-01-01T10:00:00Z",
+                        "status": "SENT",
+                        "createdAt": "2026-11-06T09:01:00Z"
+                      }
+                    ]
                   }
-                ]
+                }
               }
             }
           }
@@ -228,12 +279,14 @@
       "get": {
         "tags": ["Reminders"],
         "summary": "Get a single reminder by ID",
+        "description": "Fetch one reminder. Poll this after creating a due reminder to see `PENDING` → `PROCESSING` → `SENT`.",
         "operationId": "getReminder",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
+            "description": "Reminder ID returned from POST /reminders",
             "schema": { "type": "integer", "format": "int64" },
             "example": 1
           }
@@ -244,14 +297,31 @@
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ReminderResponse" },
-                "example": {
-                  "id": 1,
-                  "userId": 1,
-                  "title": "Call John",
-                  "description": "Discuss project",
-                  "scheduledTime": "2030-01-15T10:00:00Z",
-                  "status": "PENDING",
-                  "createdAt": "2026-11-06T09:00:00Z"
+                "examples": {
+                  "pending": {
+                    "summary": "Just created",
+                    "value": {
+                      "id": 1,
+                      "userId": 1,
+                      "title": "Call John",
+                      "description": "Discuss project",
+                      "scheduledTime": "2030-01-15T10:00:00Z",
+                      "status": "PENDING",
+                      "createdAt": "2026-11-06T09:00:00Z"
+                    }
+                  },
+                  "sent": {
+                    "summary": "After worker delivered notification",
+                    "value": {
+                      "id": 2,
+                      "userId": 1,
+                      "title": "Call John now",
+                      "description": "Should move PENDING → PROCESSING → SENT",
+                      "scheduledTime": "2020-01-01T10:00:00Z",
+                      "status": "SENT",
+                      "createdAt": "2026-11-06T09:01:00Z"
+                    }
+                  }
                 }
               }
             }
@@ -275,6 +345,7 @@
       "delete": {
         "tags": ["Reminders"],
         "summary": "Delete a reminder",
+        "description": "Deletes the reminder row. If a job row still references it, delete may fail with a foreign-key error until Stage 7+ softens that (jobs reference reminders).",
         "operationId": "deleteReminder",
         "parameters": [
           {
@@ -358,6 +429,7 @@
           "userId": {
             "type": "integer",
             "format": "int64",
+            "description": "Must be an existing user id from POST /users",
             "example": 1
           },
           "title": {
@@ -375,10 +447,17 @@
           "scheduledTime": {
             "type": "string",
             "format": "date-time",
+            "description": "ISO-8601 instant (UTC recommended). Past/near-now times are claimed by the scheduler.",
             "example": "2030-01-15T10:00:00Z"
           }
         },
         "required": ["userId", "title", "scheduledTime"]
+      },
+      "ReminderStatus": {
+        "type": "string",
+        "description": "Reminder lifecycle. Transitions after create are driven by background jobs, not by REST.\n\n- `PENDING` — waiting for due time\n- `PROCESSING` — claimed by scheduler; job enqueued\n- `SENT` — worker delivered notification\n- `FAILED` — reserved for later failure paths on the reminder itself",
+        "enum": ["PENDING", "PROCESSING", "SENT", "FAILED"],
+        "example": "PENDING"
       },
       "ReminderResponse": {
         "type": "object",
@@ -388,11 +467,7 @@
           "title": { "type": "string", "example": "Call John" },
           "description": { "type": "string", "nullable": true, "example": "Discuss project" },
           "scheduledTime": { "type": "string", "format": "date-time", "example": "2030-01-15T10:00:00Z" },
-          "status": {
-            "type": "string",
-            "enum": ["PENDING", "PROCESSING", "SENT", "FAILED"],
-            "example": "PENDING"
-          },
+          "status": { "$ref": "#/components/schemas/ReminderStatus" },
           "createdAt": { "type": "string", "format": "date-time", "example": "2026-11-06T09:00:00Z" }
         },
         "required": ["id", "userId", "title", "scheduledTime", "status", "createdAt"]
