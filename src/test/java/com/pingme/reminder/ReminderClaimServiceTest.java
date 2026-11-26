@@ -27,7 +27,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * Stage 5 — Claim rules against real PostgreSQL. An in-memory fake would not take
  * {@code FOR UPDATE SKIP LOCKED}, so it cannot prove the duplicate-processing guard.
  */
-@SpringBootTest(properties = "pingme.scheduler.enabled=false")
+@SpringBootTest(properties = {"pingme.scheduler.enabled=false", "pingme.worker.enabled=false"})
 @Testcontainers
 class ReminderClaimServiceTest {
 
@@ -46,10 +46,15 @@ class ReminderClaimServiceTest {
 	private ReminderRepository reminderRepository;
 
 	@Autowired
+	private ReminderJobRepository reminderJobRepository;
+
+	@Autowired
 	private UserRepository userRepository;
 
 	@BeforeEach
 	void clean() {
+		// Jobs reference reminders (FK), so they must be deleted first.
+		reminderJobRepository.deleteAll();
 		reminderRepository.deleteAll();
 		userRepository.deleteAll();
 	}
