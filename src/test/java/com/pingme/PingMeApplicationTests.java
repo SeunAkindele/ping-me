@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -31,12 +32,16 @@ class PingMeApplicationTests {
 	}
 
 	@Test
-	void registersOneFixedDelayClaimTask() {
-		assertEquals(1, scheduledTaskHolder.getScheduledTasks().size());
-		ScheduledTask scheduledTask = scheduledTaskHolder.getScheduledTasks().iterator().next();
-		FixedDelayTask task = assertInstanceOf(FixedDelayTask.class, scheduledTask.getTask());
-		assertEquals(Duration.ofSeconds(30), task.getIntervalDuration());
-		assertEquals(Duration.ZERO, task.getInitialDelayDuration());
+	void registersFixedDelaySchedulerAndWorkerTasks() {
+		// Stage 6: two background loops — scheduler (producer, 30s) and worker (consumer, 10s).
+		List<Duration> intervals = scheduledTaskHolder.getScheduledTasks().stream()
+				.map(ScheduledTask::getTask)
+				.map(task -> assertInstanceOf(FixedDelayTask.class, task))
+				.peek(task -> assertEquals(Duration.ZERO, task.getInitialDelayDuration()))
+				.map(FixedDelayTask::getIntervalDuration)
+				.sorted()
+				.toList();
+		assertEquals(List.of(Duration.ofSeconds(10), Duration.ofSeconds(30)), intervals);
 	}
 
 }

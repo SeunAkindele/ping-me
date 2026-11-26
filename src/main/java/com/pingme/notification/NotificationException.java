@@ -1,30 +1,40 @@
 package com.pingme.notification;
 
 /**
- * Stage 6 — Signals that a notification delivery failed.
+ * Stage 6/7 — Signals that a notification delivery failed.
  *
- * <p>The worker catches this specific exception to decide what to do next:
+ * <p>Wrapping the root cause (the {@code cause} parameter) preserves the original error for
+ * logging while giving the worker a small, predictable set of exception types to catch.
+ * Without this, the worker would need to catch {@code IOException}, {@code TimeoutException},
+ * {@code SmtpException}, etc. — one per provider. Domain exceptions wrap infrastructure
+ * exceptions so business logic handles a few types, not a dozen.
+ *
+ * <h3>Stage 7 — failures come in two kinds</h3>
+ *
+ * <p>The single most important retry decision is: <em>will trying again help?</em> Only the
+ * adapter that talks to the provider can answer that, because only it understands the provider's
+ * error codes. So the adapter expresses its answer through the exception type:
+ *
  * <ul>
- *   <li>Mark the job as FAILED.</li>
- *   <li>Log the error for investigation.</li>
- *   <li>Stage 7: decide whether to retry or give up based on attempt count.</li>
+ *   <li>{@link TransientNotificationException} — probably temporary (timeout, connection reset,
+ *       HTTP 429/503). The worker retries with backoff.</li>
+ *   <li>{@link PermanentNotificationException} — retrying cannot succeed (invalid address,
+ *       recipient unsubscribed, HTTP 400). The worker dead-letters the job immediately.</li>
  * </ul>
  *
- * <p>Wrapping the root cause (the {@code cause} parameter) preserves the original error
- * for logging while giving the worker a single, predictable exception type to catch.
- * Without this, the worker would need to catch {@code IOException}, {@code TimeoutException},
- * {@code SmtpException}, etc. — one per email provider.
- *
- * <p>This is a common pattern: domain-specific exceptions wrap infrastructure exceptions
- * so your business logic handles one type, not a dozen.
+ * <p>The class is {@code sealed}: these two subtypes are the only ones allowed. Every
+ * {@code NotificationException} the worker sees is therefore exactly one of the two, and adding a
+ * third kind later is a compile-time decision rather than a surprise at runtime. It is
+ * {@code abstract} so no one can throw an unclassified failure.
  */
-public final class NotificationException extends RuntimeException {
+public abstract sealed class NotificationException extends RuntimeException
+		permits TransientNotificationException, PermanentNotificationException {
 
-	public NotificationException(String message) {
+	protected NotificationException(String message) {
 		super(message);
 	}
 
-	public NotificationException(String message, Throwable cause) {
+	protected NotificationException(String message, Throwable cause) {
 		super(message, cause);
 	}
 

@@ -1,7 +1,7 @@
 package com.pingme.notification;
 
 /**
- * Stage 6 — Port for sending reminder notifications.
+ * Stage 6/7 — Port for sending reminder notifications.
  *
  * <p>An interface (port) defines <em>what</em> the application needs without saying <em>how</em>.
  * The application service calls {@link #send(ReminderNotification)}. The implementation decides
@@ -34,8 +34,18 @@ public interface NotificationSender {
 	/**
 	 * Sends a reminder notification to the recipient.
 	 *
+	 * <p>Stage 7 contract: implementations must classify their failures. Translate provider
+	 * errors into {@link TransientNotificationException} when a retry could succeed, and
+	 * {@link PermanentNotificationException} when it cannot. Any other exception that escapes is
+	 * treated by the worker as transient, because an unexpected bug is not proof the message can
+	 * never be delivered.
+	 *
+	 * <p>Implementations should also expect to be called more than once for the same reminder:
+	 * retries and crash recovery give <em>at-least-once</em> delivery, not exactly-once.
+	 *
 	 * @param notification the data needed to build and deliver the notification
-	 * @throws NotificationException if the delivery failed (network error, provider rejected, etc.)
+	 * @throws TransientNotificationException if delivery failed but may succeed on retry
+	 * @throws PermanentNotificationException if delivery can never succeed for this notification
 	 */
 	void send(ReminderNotification notification);
 

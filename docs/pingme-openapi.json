@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PingMe API",
-    "description": "PingMe personal reminder system — manage users and reminders.\n\n**HTTP surface (Stages 1–4):** create users, create/list/get/delete reminders.\n\n**Background (Stages 5–6, not HTTP):** every ~30s the scheduler claims due `PENDING` reminders and enqueues jobs; every ~10s the worker sends notifications and moves reminders to `SENT` (or jobs to `FAILED`).\n\n**Apidog test flow**\n1. `GET /health` — confirm the app is up\n2. `POST /users` — create a user; copy `id`\n3. `POST /reminders` — create a reminder with that `userId`\n4. Use `scheduledTime` a few seconds in the past (or very soon) to exercise the worker\n5. Poll `GET /reminders/{id}` until `status` becomes `PROCESSING` then `SENT`\n6. Check app logs for the console notification block",
+    "description": "PingMe personal reminder system — manage users and reminders.\n\n**HTTP surface (Stages 1–4):** create users, create/list/get/delete reminders.\n\n**Background (Stages 5–7, not HTTP):** every ~30s the scheduler claims due `PENDING` reminders and enqueues jobs; every ~10s the worker sends notifications and moves reminders to `SENT`.\n\n**Retries (Stage 7):** a transient send failure is retried up to 3 attempts in total, waiting 30s and then 60s between attempts (rounded up to the next worker tick). The reminder stays `PROCESSING` while retrying. A permanent failure, or a third failed attempt, dead-letters the job and the reminder becomes `FAILED`.\n\n**Apidog test flow — happy path**\n1. `GET /health` — confirm the app is up\n2. `POST /users` — create a user; copy `id`\n3. `POST /reminders` — use example `dueNowForWorkerTest` with that `userId`\n4. Poll `GET /reminders/{id}` until `status` becomes `PROCESSING` then `SENT` (~40s)\n5. Check app logs for the console notification block\n\n**Apidog test flow — retries (Stage 7)**\nStart the app with `--pingme.notification.console.simulate-failures=true`, then create due reminders using the examples `retryExhausted`, `permanentFailure` and `flakyRetry`. The marker in the title (`[fail-transient]`, `[fail-permanent]`, `[flaky]`) makes the console sender fail on purpose. Poll `GET /reminders/{id}`:\n- `[fail-permanent]` → `FAILED` after one attempt (~40s)\n- `[fail-transient]` → stays `PROCESSING` for ~2–3 min, then `FAILED`\n- `[flaky]` → usually `SENT` after 0–2 retries\n\nAttempt counts and errors are not exposed over HTTP. Watch the WARN/ERROR log lines, or query the `reminder_jobs` table (`attempt_count`, `last_error`, `next_attempt_at`).",
     "version": "0.0.1-SNAPSHOT"
   },
   "servers": [
@@ -141,7 +141,7 @@
       "post": {
         "tags": ["Reminders"],
         "summary": "Create a reminder for an existing user",
-        "description": "Creates a reminder in `PENDING` status.\n\n- Use a **future** `scheduledTime` for normal storage/list tests.\n- Use a **past** (or near-now) `scheduledTime` to trigger Stage 5/6: within ~30s the scheduler moves it to `PROCESSING` and enqueues a job; within ~10s more the worker sends the console notification and status becomes `SENT`.\n\nThere is no HTTP endpoint for jobs; observe via `GET /reminders/{id}` and application logs.",
+        "description": "Creates a reminder in `PENDING` status.\n\n- Use a **future** `scheduledTime` for normal storage/list tests.\n- Use a **past** (or near-now) `scheduledTime` to trigger Stage 5/6: within ~30s the scheduler moves it to `PROCESSING` and enqueues a job; within ~10s more the worker sends the console notification and status becomes `SENT`.\n- **Stage 7:** with `pingme.notification.console.simulate-failures=true`, a title containing `[fail-transient]`, `[fail-permanent]` or `[flaky]` makes delivery fail on purpose so you can watch retries and dead-lettering. With the flag off (the default), markers are ignored and the reminder is sent normally.\n\nThere is no HTTP endpoint for jobs; observe via `GET /reminders/{id}`, application logs, and the `reminder_jobs` table.",
         "operationId": "createReminder",
         "requestBody": {
           "required": true,
@@ -165,6 +165,36 @@
                     "userId": 1,
                     "title": "Call John now",
                     "description": "Should move PENDING → PROCESSING → SENT",
+                    "scheduledTime": "2020-01-01T10:00:00Z"
+                  }
+                },
+                "retryExhausted": {
+                  "summary": "Stage 7 — transient failure, retries exhausted",
+                  "description": "Requires simulate-failures=true. Every attempt fails transiently: 3 attempts (waits of ~30s then ~60s), then the job is dead-lettered. Reminder: PENDING → PROCESSING (for ~2–3 min) → FAILED.",
+                  "value": {
+                    "userId": 1,
+                    "title": "Gym session [fail-transient]",
+                    "description": "Should retry twice, then end FAILED",
+                    "scheduledTime": "2020-01-01T10:00:00Z"
+                  }
+                },
+                "permanentFailure": {
+                  "summary": "Stage 7 — permanent failure, no retry",
+                  "description": "Requires simulate-failures=true. Fails permanently on the first attempt and goes straight to the dead letter queue. Reminder: PENDING → PROCESSING → FAILED (~40s).",
+                  "value": {
+                    "userId": 1,
+                    "title": "Pay rent [fail-permanent]",
+                    "description": "Should end FAILED after one attempt",
+                    "scheduledTime": "2020-01-01T10:00:00Z"
+                  }
+                },
+                "flakyRetry": {
+                  "summary": "Stage 7 — flaky provider, succeeds on retry",
+                  "description": "Requires simulate-failures=true. Each attempt fails ~50% of the time. Usually ends SENT after 0–2 retries; occasionally FAILED if all 3 attempts fail.",
+                  "value": {
+                    "userId": 1,
+                    "title": "Dentist appointment [flaky]",
+                    "description": "Should usually end SENT after a retry",
                     "scheduledTime": "2020-01-01T10:00:00Z"
                   }
                 }
@@ -279,7 +309,7 @@
       "get": {
         "tags": ["Reminders"],
         "summary": "Get a single reminder by ID",
-        "description": "Fetch one reminder. Poll this after creating a due reminder to see `PENDING` → `PROCESSING` → `SENT`.",
+        "description": "Fetch one reminder. Poll this after creating a due reminder to see `PENDING` → `PROCESSING` → `SENT`, or `PROCESSING` → `FAILED` when delivery failed permanently or ran out of retries (Stage 7). While a retry is waiting, the status stays `PROCESSING`.",
         "operationId": "getReminder",
         "parameters": [
           {
@@ -321,6 +351,18 @@
                       "status": "SENT",
                       "createdAt": "2026-11-06T09:01:00Z"
                     }
+                  },
+                  "failed": {
+                    "summary": "Stage 7 — delivery failed and job was dead-lettered",
+                    "value": {
+                      "id": 3,
+                      "userId": 1,
+                      "title": "Gym session [fail-transient]",
+                      "description": "Should retry twice, then end FAILED",
+                      "scheduledTime": "2020-01-01T10:00:00Z",
+                      "status": "FAILED",
+                      "createdAt": "2026-11-06T09:02:00Z"
+                    }
                   }
                 }
               }
@@ -345,7 +387,7 @@
       "delete": {
         "tags": ["Reminders"],
         "summary": "Delete a reminder",
-        "description": "Deletes the reminder row. If a job row still references it, delete may fail with a foreign-key error until Stage 7+ softens that (jobs reference reminders).",
+        "description": "Deletes the reminder in any status. Its delivery jobs (including dead-lettered ones) are deleted with it by the database (`ON DELETE CASCADE`, migration V6), so this works even after the scheduler has enqueued a job.",
         "operationId": "deleteReminder",
         "parameters": [
           {
@@ -455,7 +497,7 @@
       },
       "ReminderStatus": {
         "type": "string",
-        "description": "Reminder lifecycle. Transitions after create are driven by background jobs, not by REST.\n\n- `PENDING` — waiting for due time\n- `PROCESSING` — claimed by scheduler; job enqueued\n- `SENT` — worker delivered notification\n- `FAILED` — reserved for later failure paths on the reminder itself",
+        "description": "Reminder lifecycle. Transitions after create are driven by background jobs, not by REST.\n\n- `PENDING` — waiting for due time\n- `PROCESSING` — claimed by scheduler; a job is being delivered or is waiting to retry\n- `SENT` — worker delivered notification\n- `FAILED` — delivery failed permanently, or all retry attempts (default 3) failed. Terminal; the job is in the dead letter queue",
         "enum": ["PENDING", "PROCESSING", "SENT", "FAILED"],
         "example": "PENDING"
       },
